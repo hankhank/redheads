@@ -1,4 +1,6 @@
 
+#include <iterator>
+
 constexpr size_t NULL_ORDER = 0;
 constexpr uint64_t NULL_ID = 0;
 
@@ -18,55 +20,77 @@ enum class Opcode : uint8_t
     OP_BOOK_DELETE
 };
 
-struct BookReq
-{
-    // todo no way to delete
-    Opcode   mCode;       // 1
-    uint16_t mBookId;     // 2
-    uint16_t mPartId;     // 2
-    uint16_t mTransId;    // 2
-    bool     mIsBid;      // 1
-    bool     mIsFak;      // 1
-    int64_t  mPrice;      // 8
-    int64_t  mVolume;     // 8
-};
-// 25
-
-struct ExtBookReq
-{
-    uint16_t mBookId;
-    Opcode   mCode;
-    uint16_t mTransId;
-    uint64_t mOrderId;
-    char     tag[20];
-};
-
-struct BookRsp
+struct BookInsertReq
 {
     Opcode   mCode;
-    uint16_t mBookId;
+    uint8_t  mAPID;
     uint16_t mTransId;
-    uint64_t mOrderId;
-    int64_t  mPrice;
-    int64_t  mVolume;
+    uint16_t mBookId;
+    uint16_t mClientId;
     bool     mIsBid;
-    uint64_t mTimestamp;
+    bool     mIsFak;
+    int64_t  mPrice;
+    int64_t  mVolume;
 };
 
-struct TradeInd
+struct BookDeleteReq
 {
-    uint16_t mBookId;
+    Opcode   mCode;
+    uint8_t  mAPID;
     uint16_t mTransId;
+    uint16_t mBookId;
+    uint16_t mClientId;
+    uint64_t mOrderId;
+};
+
+struct BookAmendReq
+{
+    Opcode   mCode;
+    uint8_t  mAPID;
+    uint16_t mTransId;
+    uint16_t mBookId;
+    uint16_t mClientId;
+    uint64_t mOrderId
+    int64_t  mPrice;
+    int64_t  mVolume;
+};
+
+struct BookAmendDeltaReq
+{
+    Opcode   mCode;
+    uint8_t  mAPID;
+    uint16_t mTransId;
+    uint16_t mBookId;
+    uint16_t mClientId;
     uint64_t mOrderId;
     int64_t  mPrice;
     int64_t  mVolume;
-    bool     mAggressorIsBid;
+};
+
+struct BookAcceptRsp
+{
+    uint16_t mTransId;
     uint64_t mTimestamp;
 };
 
 struct BookInd
 {
     uint16_t mLastTransId;
+    uint64_t mTimestamp;
+};
+
+struct TradeInd
+{
+    uint8_t  mAPID;
+    uint16_t mTransId;
+    uint16_t mBookId;
+    uint64_t mAggressorClientId;
+    uint64_t mPassiveClientId;
+    uint64_t mAggressorOrderId;
+    uint64_t mPassiveOrderId;
+    int64_t  mPrice;
+    int64_t  mVolume;
+    bool     mAggressorIsBid;
     uint64_t mTimestamp;
 };
 
@@ -126,93 +150,76 @@ public:
         return newLoc;
     }
 
-    inline void JoinLevel(size_t lead, size_t end)
-    {
-        size_t lastLoc = lead;
-        size_t nextLoc = mMem.mOrderPool[lead].mNext;
-        while(nextLoc) 
-        {
-            lastLoc = nextLoc;
-            nextLoc = mMem.mOrderPool[nextLoc].mNext;
-        }
-        mMem.mOrderPool[lastLoc].mNext = end;
-    }
-
     template<typename T>
     void HandleInsertSide(const BookReq& req, std::vector<Level>& supporting, 
             std::vector<Level>& opposing, T lessAggressive)
     {
         uint64_t orderId = ++mNextOrderId;
-        if(!opposing.empty() && 
-            ((req.mPrice == mMem.mOrderPool[opposing.back().mLead].mPrice) ||
-            lessAggressive(mMem.mOrderPool[opposing.back().mLead].mPrice, req.mPrice)))
-        {
-            int64_t remainingVolume = req.mVolume;
-            auto aritr = opposing.rbegin();
-            while((aritr != opposing.rend()) && 
-                    (remainingVolume > 0) &&
-                    (lessAggressive(mMem.mOrderPool[aritr->mLead].mPrice, req.mPrice) ||
-                    (mMem.mOrderPool[aritr->mLead].mPrice == req.mPrice)))
-            {
-                do
-                {
-                    auto& order = mMem.mOrderPool[aritr->mLead];
-                    int64_t match = std::min(order.mVolume, remainingVolume);
-                    remainingVolume -= match;
-                    order.mVolume -= match;
-                    // TODO send match
-                    if(order.mVolume <= 0)
-                    {
-                        mMem.mOrderFreeList.push_back(aritr->mLead);
-                        aritr->mLead = order.mNext;
-                        order = Order();
-                    }
-                }
-                while(aritr->mLead && remainingVolume > 0);
 
-                if(aritr->mLead == NULL_ID)
+        // Try trading it
+        int64_t remainingVolume = req.mVolume;
+        auto aritr = opposing.rbegin();
+        while
+        (
+            (aritr != opposing.rend()) && 
+            (remainingVolume > 0) &&
+            (
+                 lessAggressive(mMem.mOrderPool[aritr->mLead].mPrice, req.mPrice) ||
+                (mMem.mOrderPool[aritr->mLead].mPrice == req.mPrice)
+            )
+        )
+        {
+            do
+            {
+                auto& order = mMem.mOrderPool[aritr->mLead];
+                int64_t match = std::min(order.mVolume, remainingVolume);
+                remainingVolume -= match;
+                order.mVolume -= match;
+                // TODO send match
+                if(order.mVolume <= 0)
                 {
-                    opposing.pop_back();
+                    mMem.mOrderFreeList.push_back(aritr->mLead);
+                    aritr->mLead = order.mNext;
+                    order = Order();
                 }
             }
-            if(!req.mIsFak && remainingVolume > 0)
+            while(aritr->mLead && remainingVolume > 0);
+
+            if(aritr->mLead == NULL_ID)
             {
-                size_t newLoc = PopSetOrder(orderId, req.mPrice, remainingVolume);
-                supporting.push_back({newLoc, newLoc});
-                // publish resting order
+                opposing.pop_back();
             }
-            else
-            {
-                // todo broadcast fak final result
-            }
+            ++aritr;
         }
-        else if(!req.mIsFak)
+
+        if(!req.mIsFak && (remainingVolume > 0))
         {
             auto britr = supporting.rbegin();
-            while((britr != supporting.rend()) && lessAggressive(req.mPrice, mMem.mOrderPool[*britr].mPrice)) ++britr;
-            if(mMem.mOrderPool[*britr].mPrice == req.mPrice)
+            while((britr != supporting.rend()) && lessAggressive(req.mPrice, mMem.mOrderPool[britr->mLead].mPrice)) ++britr;
+            if(mMem.mOrderPool[britr->mLead].mPrice == req.mPrice)
             {
-                if(mMem.mOrderPool[*britr].mOrderId == NULL_ID)
+                if(mMem.mOrderPool[britr->mLead].mOrderId == NULL_ID) // empty level
                 {
-                    mMem.mOrderPool[*britr] = {orderId, req.mPrice, req.mVolume, 0};
-                    mMem.mOrderLookup[orderId] = *britr;
+                    mMem.mOrderPool[britr->mLead] = {orderId, req.mPrice, req.mVolume, 0};
+                    mMem.mOrderLookup[orderId] = britr->mLead;
                 }
                 else
                 {
                     size_t newLoc = PopSetOrder(orderId, req.mPrice, req.mVolume);
-                    JoinLevel(*britr, newLoc);
+                    mMem.mOrderPool[britr->mEnd].mNext = newLoc;
+                    britr->mEnd = newLoc;
                 }
             }
             else
             {
                 size_t newLoc = PopSetOrder(orderId, req.mPrice, req.mVolume);
-                supporting.insert(britr, newLoc);
+                supporting.emplace(britr, {newLoc, newLoc});
             }
             // broadcast resting order
         }
-        else // fak miss
+        else
         {
-            // todo broadcast fak miss
+            // todo broadcast fak final state
         }
     }
 
@@ -241,10 +248,13 @@ public:
         order.mOrderId = NULL_ID;
         // do we need to keep the level this order was on
         // need a way to clean up old orders better
+        // check this user can delete it
     }
 
     void Amend(BookReq& req)
     {
+        Delete(req);
+        Insert(req);
         // todo handle as delete+insert
     }
 
