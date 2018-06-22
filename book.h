@@ -2,10 +2,9 @@
 namespace redheads
 {
 
-constexpr size_t VAR_TEXT_SIZE = 10;
-constexpr size_t NULL_ORDER = 0;
-constexpr uint64_t NULL_ID = 0;
-
+constexpr size_t   VAR_TEXT_SIZE = 10;
+constexpr size_t   NULL_ORDER    = 0;
+constexpr uint64_t NULL_ID       = 0;
 
 #pragma pack(1)
 
@@ -19,6 +18,14 @@ enum class OrderFlags : uint8_t
     IS_BID = 1 << 0,
     IS_ASK = 1 << 1,
     IS_FAK = 1 << 2,
+};
+
+enum class ErrorCode : uint8_t
+{
+    OK                   = 0;
+    UNKNOWN_ORDER        = 1 << 0,
+    NOT_CLIENT_ORDER     = 1 << 1,
+    CLIENT_HAS_NO_ORDERS = 1 << 2,
 };
 
 struct BookInsertReq
@@ -107,8 +114,9 @@ struct BookTradeInd
 
 struct BookErrorInd
 {
-    uint16_t mClientId;
-    uint64_t mOrderId;
+    uint16_t  mClientId;
+    uint64_t  mOrderId;
+    ErrorCode mCode;
 };
 
 #pragma pop()
@@ -155,8 +163,9 @@ struct IBookClient
 
 struct Book
 {
-    Book(uint16_t bookId, uint64_t initOrderId, SharedBookMem& bookMem, IBookClient& client) 
-    : mBookId(bookId)
+    Book(BookBehaviours behaviours, uint16_t bookId, uint64_t initOrderId, SharedBookMem& bookMem, IBookClient& client) 
+    : mBehaviours(behaviours)
+    , mBookId(bookId)
     , mMem(bookMem)
     , mClient(client)
     , mOrderId(initOrderId)
@@ -176,7 +185,7 @@ struct Book
         mMem.mOrderLookup[orderId] = newLoc;
         mMem.mOrderExtraInfoPool.emplace(newLoc, {varText});
         mMem.mClientOrderLookup[clientId].push_back(orderId);
-        mMem.mOrderPool[newLoc] = {orderId, price, volume, 0};
+        mMem.mOrderPool.emplace(newLoc, {clientId, orderId, price, volume, NULL_ORDER});
     }
 
     inline size_t PopSetOrder(uint64_t orderId, uint16_t clientId, 
@@ -189,9 +198,9 @@ struct Book
         size_t newLoc = mMem.mOrderFreeList.back();
         mMem.mOrderFreeList.pop();
         mMem.mOrderLookup[orderId] = newLoc;
-        mMem.mOrderExtraInfoPool.emplace(newLoc, varText);
+        mMem.mOrderExtraInfoPool.emplace(newLoc, {varText});
         mMem.mClientOrderLookup[clientId].push_back(orderId);
-        mMem.mOrderPool.emplace(newLoc, {orderId, price, volume, 0});
+        mMem.mOrderPool.emplace(newLoc, {clientId, orderId, price, volume, NULL_ORDER});
         return newLoc;
     }
 
@@ -256,10 +265,9 @@ struct Book
 
                 if(order.mVolume <= 0)
                 {
-                    ProcessDelete(order);
                     mMem.mOrderFreeList.push_back(aritr->mLead);
                     aritr->mLead = order.mNext;
-                    order = Order();
+                    ProcessDelete(order);
                 }
             }
             while(aritr->mLead && remainingVolume > 0);
@@ -274,6 +282,8 @@ struct Book
         if(!(flags & IS_FAK) && (remainingVolume > 0))
         {
             auto britr = supporting.rbegin();
+            // TODO instead of a linear search here I think we could linear search < 10 tops levels then fall
+            // back to binary search
             while((britr != supporting.rend()) && lessAggressive(price, mMem.mOrderPool[britr->mLead].mPrice)) ++britr;
             if(mMem.mOrderPool[britr->mLead].mPrice == price)
             {
@@ -350,18 +360,28 @@ struct Book
         return orderOffset;
     }
 
-    void ProcessQuotes(std::vector<size_t>& curQuotes, uint16_t clientId, bool isBid,
+    void ProcessQuotes(std::vector<uint64_t>& curQuotes, uint16_t clientId, bool isBid,
             const char& varText[VAR_TEXT_SIZE], const QuoteLevel* levels, uint8_t levelCount)
     {
-        auto curIdItr = curQuotes.begin();
         uint8_t cnt = 0;
+        auto curIdItr = curQuotes.begin();
         while(curIdItr == curQuotes->end())
         {
-            auto& order = mMem.mOrderPool[*curIdItr];
+            // TODO later consider adding insert here if order has been
+            // delete or traded otherwise quote adjustments might result 
+            // in loss of qp
+            auto litr = mMem.mOrderLookup.find(req.mOrderId);
+            if(litr == mMem.mOrderLookup.end())
+            {
+                curIdItr = curQuotes->erase(curIdItr);
+                continue;
+            }
+
+            auto& order = mMem.mOrderPool[litr->second];
             const auto& level = levels[cnt];
             if(cnt < levelCount)
             {
-                curId = ProcessAmend(curId, order, level.mPrice, level.mVolume, varText);
+                ProcessAmend(order, litr->second, level.mPrice, level.mVolume, varText);
                 ++curIdItr;
             }
             else
@@ -385,18 +405,17 @@ struct Book
             insertInd.mVolume    =  level.mVolume;
             mClient.Handle(insertInd);
             
-            size_t newLoc = NULL_ORDER;
             if(isBid)
             {
-                newLoc = ProcessInsertSide(orderId, clientId, level.mPrice, level.mVolume, IS_BID, 
+                ProcessInsertSide(orderId, clientId, level.mPrice, level.mVolume, IS_BID, 
                     varText, mBids, mAsks, std::less);
             }
             else
             {
-                newLoc = ProcessInsertSide(newOrderId, clientId, level.mPrice, level.mVolume, IS_ASK, 
+                ProcessInsertSide(newOrderId, clientId, level.mPrice, level.mVolume, IS_ASK, 
                     varText, mAsks, mBids, std::greater);
             }
-            curQuotes.push_back(newLoc);
+            curQuotes.push_back(orderId);
         }
     }
 
@@ -424,6 +443,9 @@ struct Book
 
     void Quote(BookQuoteReq& req)
     {
+        // todo check
+        // prices are descending and not in cross
+        // do not modify other participants orders
         auto& curQuotes = mClientQuotes[req.mClientId];
         ProcessQuotes(curQuotes, req.mClientId, true/*isbid*/, req.mVarText, req.mLevels, req.mBids);
         ProcessQuotes(curQuotes, req.mClientId, false/*isbid*/, req.mVarText, req.mLevels+req.mBids, req.mAsks);
@@ -434,7 +456,7 @@ struct Book
         auto litr = mMem.mOrderLookup.find(req.mOrderId);
         if(litr == mMem.mOrderLookup.end())
         {
-            // todo unknown order error
+            mClient.Handle(BookErrorInd{req.mClientId, req.mOrderId, UNKNOWN_ORDER});
             return;
         }
         assert(mMem.mOrderPool.size() < litr->second);
@@ -442,7 +464,8 @@ struct Book
         auto& order = mMem.mOrderPool[litr->second];
         if(order.mClientId != req.mClientId)
         {
-            mClient.Handle(BookErrorInd{});
+            mClient.Handle(BookErrorInd{req.mClientId, req.mOrderId, NOT_CLIENT_ORDER});
+            return;
         }
 
         ProcessDelete(order);
@@ -458,7 +481,7 @@ struct Book
         auto colitr = mMem.mClientOrderLookup.find(req.mClientId);
         if(colitr == mMem.mClientOrderLookup.end())
         {
-            // todo unknown client
+            mClient.Handle(BookErrorInd{req.mClientId, req.mOrderId, CLIENT_HAS_NO_ORDERS});
             return;
         }
         
@@ -474,7 +497,6 @@ struct Book
 
             if(MatchVarText(req.mVarText, mMem.mOrderExtraInfoPool[litr->second].mVarText))
             {
-
                 auto& order = mMem.mOrderPool[litr->second];
                 if(order.mFlags & req.mFlags)
                 {
@@ -490,7 +512,7 @@ struct Book
         auto litr = mMem.mOrderLookup.find(req.mOrderId);
         if(litr == mMem.mOrderLookup.end())
         {
-            mClient.Handle(BookErrorInd{});
+            mClient.Handle(BookErrorInd{req.mClientId, req.mOrderId, UNKNOWN_ORDER});
             return;
         }
         assert(mMem.mOrderPool.size() < litr->second);
@@ -498,15 +520,16 @@ struct Book
         auto& order = mMem.mOrderPool[litr->second];
         if(order.mClientId != req.mClientId)
         {
-            mClient.Handle(BookErrorInd{});
+            mClient.Handle(BookErrorInd{req.mClientId, req.mOrderId, NOT_CLIENT_ORDER});
         }
 
-        ProcessAmend(litr->second, order, req.mPrice, req.mVolume, req.mVarText);
+        ProcessAmend(order, litr->second, req.mPrice, req.mVolume, req.mVarText);
     }
 
     std::vector<Level> mBids; // offset to start and end of level
     std::vector<Level> mAsks;
-    std::dense_hash_map<uint16_t, std::pair<std::vector<size_t>, std::vector<size_t>>> mClientQuotes;
+    std::dense_hash_map<uint16_t, std::pair<std::vector<uint64_t>, std::vector<uint64_t>>> mClientQuotes;
+
 };
 
 }
