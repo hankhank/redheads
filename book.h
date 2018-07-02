@@ -222,6 +222,7 @@ struct Book
         mMem.mOrderLookup.erase(order.mOrderId);
         order.mVolume = 0;
         order.mOrderId = NULL_ID;
+        // if it was top level we might need to remove it
     }
 
     template<typename T>
@@ -236,47 +237,51 @@ struct Book
         tradeInd.mAggressorIsBid     =  flags & IS_BID;
 
         int64_t remainingVolume = volume;
-        auto aritr = opposing.rbegin();
+        auto opitr = opposing.rbegin();
 
         // Try trading it
         while
         (
-            (aritr != opposing.rend()) && 
+            (opitr != opposing.rend()) && 
             (remainingVolume > 0) &&
             (
-                 lessAggressive(mMem.mOrderPool[aritr->mLead].mPrice, price) ||
-                (mMem.mOrderPool[aritr->mLead].mPrice == price)
+                 lessAggressive(mMem.mOrderPool[opitr->mLead].mPrice, price) ||
+                (mMem.mOrderPool[opitr->mLead].mPrice == price)
             )
         )
         {
             do
             {
-                auto& order = mMem.mOrderPool[aritr->mLead];
+                auto& order = mMem.mOrderPool[opitr->mLead];
                 int64_t match = std::min(order.mVolume, remainingVolume);
-                remainingVolume -= match;
-                order.mVolume -= match;
-                
-                tradeInd.mTradeId          =  NextTradeId();
-                tradeInd.mPassiveClientId  =  order.mClientId;
-                tradeInd.mPassiveOrderId   =  order.mOrderId;
-                tradeInd.mPrice            =  order.mPrice;
-                tradeInd.mVolume           =  match;
-                mClient.Handle(tradeInd);
+                if(match > 0)
+                {
+                    remainingVolume -= match;
+                    order.mVolume -= match;
+                    
+                    tradeInd.mTradeId          =  NextTradeId();
+                    tradeInd.mPassiveClientId  =  order.mClientId;
+                    tradeInd.mPassiveOrderId   =  order.mOrderId;
+                    tradeInd.mPrice            =  order.mPrice;
+                    tradeInd.mVolume           =  match;
+                    mClient.Handle(tradeInd);
+                }
 
                 if(order.mVolume <= 0)
                 {
-                    mMem.mOrderFreeList.push_back(aritr->mLead);
-                    aritr->mLead = order.mNext;
-                    ProcessDelete(order);
+                    mMem.mOrderFreeList.push_back(opitr->mLead);
+                    opitr->mLead = order.mNext;
+                    if(order.mOrderId != NULL_ID) ProcessDelete(order);
                 }
             }
-            while(aritr->mLead && remainingVolume > 0);
+            while(opitr->mLead && remainingVolume > 0);
 
-            if(aritr->mLead == NULL_ID)
+            if(opitr->mLead == NULL_ORDER)
             {
+                mMem.mDroppedLevels.push_back(opitr->mLead);
                 opposing.pop_back();
             }
-            ++aritr;
+            ++opitr;
         }
 
         if(!(flags & IS_FAK) && (remainingVolume > 0))
@@ -419,7 +424,7 @@ struct Book
         }
     }
 
-    void Insert(const BookInsertReq& req)
+    void InsertReq(const BookInsertReq& req)
     {
         uint64_t orderId = NextOrderId();
 
@@ -441,7 +446,7 @@ struct Book
         }
     }
 
-    void Quote(BookQuoteReq& req)
+    void QuoteReq(BookQuoteReq& req)
     {
         // todo check
         // prices are descending and not in cross
@@ -451,7 +456,7 @@ struct Book
         ProcessQuotes(curQuotes, req.mClientId, false/*isbid*/, req.mVarText, req.mLevels+req.mBids, req.mAsks);
     }
 
-    void Delete(BookDeleteReq& req)
+    void DeleteReq(BookDeleteReq& req)
     {
         auto litr = mMem.mOrderLookup.find(req.mOrderId);
         if(litr == mMem.mOrderLookup.end())
@@ -476,7 +481,7 @@ struct Book
         return strncmp(VAR_TEXT_SIZE, pattern, target) == 0;
     }
 
-    void BulkDelete(BookBulkDeleteReq& req)
+    void BulkDeleteReq(BookBulkDeleteReq& req)
     {
         auto colitr = mMem.mClientOrderLookup.find(req.mClientId);
         if(colitr == mMem.mClientOrderLookup.end())
@@ -507,7 +512,7 @@ struct Book
         }
     }
 
-    void Amend(BookAmendReq& req)
+    void AmendReq(BookAmendReq& req)
     {
         auto litr = mMem.mOrderLookup.find(req.mOrderId);
         if(litr == mMem.mOrderLookup.end())
