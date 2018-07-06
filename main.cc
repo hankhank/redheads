@@ -1,89 +1,58 @@
 
-enum class Opcode : uint8_t
+#include <cstdio>
+#include <cunistd>
+
+void usage()
 {
-    OP_INSERT,
-    OP_DELETE,
-    OP_AMEND,
+    printf("redheads -l LISTEN_PORT -a PUB_MULTICAST_ADDR_A:PORT -b PUB_MULTICAST_ADDR_B:PORT");
+    exit();
+}
 
-    OP_BULK_INSERT,
-    OP_BULK_DELETE,
-
-    OP_BOOK_CREATE,
-    OP_BOOK_CLEAR,
-    OP_BOOK_DELETE
-};
-
-    Opcode   mCode;
-    uint8_t  mAPID;
-    uint16_t mTransId;
-    uint16_t mBookId;
-
-    Opcode   mCode;
-    uint8_t  mAPID;
-    uint16_t mTransId;
-    uint16_t mBookId;
-
-struct BookAcceptRsp
+int main (int argc, char **argv)
 {
-    uint16_t mTransId;
-    uint64_t mTimestamp;
-};
+    int listenPort = 0;
+    int publishAddrA = 0;
+    int publishAddrB = 0;
+    int publishPortA = 0;
+    int publishPortB = 0;
 
-struct BookInd
-{
-    uint16_t mLastTransId;
-    uint64_t mTimestamp;
-};
+    opterr = 0;
 
-struct ManagementReq
-{
-    Opcode mCode;
-    uint16_t mBookId;
-};
-
-
-int main()
-{
-    while()
+    while ((c = getopt (argc, argv, "l:a:b:")) != -1)
     {
-        case OP_INSERT:
+        switch (c)
         {
+            case 'l':
+            {
+                int a,b,c,d,port;
+                sscanf(optarg, "%d.%d.%d.%d:%d", a,b,c,d,port);
+                listenPort = atoi(optarg);
+            }
+            break;
+            case 'a':
+            {
+                publishPortA = atoi(optarg);
+            }
+            break;
+            case 'b':
+            {
+                publishPortB = atoi(optarg);
+            }
+            break;
+            default: usage();
         }
-        break;
+    }
 
-        case OP_DELETE,
-        {
-        }
-        break;
+    Engine engine;
+    engine.Init(1000, 100000, 500);
 
-        case OP_AMEND,
+    while(true)
+    {
+        // epoll udp
+        engine.HandleMsg();
+        if(periodicIdleJob)
         {
+            engine.ImmediateCleanup();
         }
-        break;
-
-        case OP_BULK_INSERT,
-        {
-        }
-        break;
-
-        case OP_BULK_DELETE,
-        {
-        }
-        break;
-
-        case OP_BOOK_CREATE,
-        {
-        }
-        break;
-
-        case OP_BOOK_CLEAR,
-        {
-        }
-        break;
-
-        case OP_BOOK_DELETE
-        {
-        }
-        break;
     }
 }

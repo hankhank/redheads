@@ -10,6 +10,7 @@ enum class EngMsgId : uint8_t
 {
     PART_BOOK_CREATE_REQ,
 
+    PART_BOOK_OP_CLEAR_REQ,
     PART_BOOK_OP_INSERT_REQ,
     PART_BOOK_OP_QUOTE_REQ,
     PART_BOOK_OP_DEL_REQ,
@@ -46,37 +47,6 @@ struct EngSeriesId
     int32_t  mStrikePrice;
 };
 
-inline uint32_t EngSeriesId2InstrType(const EngSeriesId& id)
-{
-    return 
-    (
-        (id.mCountry << 16) |
-        (id.mMarket << 8)   |
-        (id.InstrumentGroup)
-    );
-}
-
-inline uint64_t EngSeriesId2InstrClass(const EngSeriesId& id)
-{
-    return 
-    (
-        (id.mCommodity << 24) |
-        (id.mCountry << 16)   |
-        (id.mMarket << 8)     |
-        (id.InstrumentGroup)
-    );
-}
-
-inline uint64_t EngSeriesId2Underlying(const EngSeriesId& id)
-{
-    return 
-    (
-        (id.mCommodity << 24) |
-        (id.mCountry << 16)   |
-        (id.mMarket << 8)
-    );
-}
-
 struct OperationId
 {
     uint16_t mGatewayId;
@@ -88,15 +58,8 @@ struct EngCreateBookReq
     EngMsgId       mMsgId;
     EngSeriesId    mSeries;
     OperationId    mOperationId;
+    uint16_t       mBookId;
     BookBehaviours mBookBehaviours;
-};
-
-struct EngAvailableBooksInd
-{
-    EngMsgId       mMsgId;
-    EngSeriesId    mSeries;
-    BookBehaviours mBookBehaviours;
-    uint64_t       mTimestamp;
 };
 
 struct EngOperationReq
@@ -104,24 +67,59 @@ struct EngOperationReq
     EngMsgId     mMsgId;
     EngSeriesId  mSeries;
     OperationId  mOperationId;
-    union
-    {
-        EngCreateBookReq  mCreateBookReq;
-        BookInsertReq     mBookInsertReq;
-        BookQuoteReq      mBookQuoteReq;
-        BookDeleteReq     mBookDeleteReq;
-        BookBulkDeleteReq mBookBulkDeleteReq;
-        BookAmendReq      mBookAmendReq;
-    };
+};
+
+struct EngAvailableBooksInd
+{
+    EngMsgId       mMsgId;
+    EngSeriesId    mSeries;
+    uint16_t       mBookId;
+    BookBehaviours mBookBehaviours;
+    uint64_t       mTimestamp;
+};
+
+struct EngBookInd
+{
+    EngMsgId       mMsgId;
 };
 
 struct EngOperationCnf
 {
-    EngMsgId mMsgId;
-    OperationId  mOperationId;
+    EngMsgId    mMsgId;
+    OperationId mOperationId;
 };
 
 #pragma pop()
+
+inline EngSeriesId MaskEngSeriesIdByInstrType(EngSeriesId id)
+{
+    id.mModifier = 0;
+    id.mCommodity = 0;
+    id.mExpirationDate = 0;
+    id.mStrikePrice = 0;
+    return id;
+}
+
+inline EngSeriesId MaskEngSeriesIdByInstrClass(EngSeriesId id)
+{
+    id.mModifier = 0;
+    id.mExpirationDate = 0;
+    id.mStrikePrice = 0;
+}
+
+inline EngSeriesId MaskEngSeriesIdByUnderlying(EngSeriesId id)
+{
+    id.mInstrumentGroup = 0;
+    id.mModifier = 0;
+    id.mExpirationDate = 0;
+    id.mStrikePrice = 0;
+}
+
+struct IEngineClient
+{
+    virtual ~IEngineClient(){}
+    virtual void Handle(const BookClearInd&& ind) = 0;
+};
 
 struct Engine : IBookClient
 {
@@ -146,68 +144,73 @@ struct Engine : IBookClient
         const auto* opId   = static_cast<OperationId*>((const char*)series+sizeof(*series));
 
         if(size < (sizeof(*msgId) + sizeof(*series) + sizeof(*opId))) return;
-        if(opId->mSequence > mLastOpId+1) return;
-        if(opId->mSequence <= mLastOpId) return;
+        HandleMsg(*msgId, *series, *opId, opId + sizeof(*opId));
+    }
 
-        auto* books = LookupBook(*series);
+    void HandleMsg(const EngOperationReq& req, void* msg)
+    {
+        if(req.mOperationId.mSequence > mLastOpId+1) return;
+        if(req.mOperationId.mSequence <= mLastOpId) return;
+
+        auto* books = LookupBook(series);
 
         // TODO check sizes here for types
 #define HandleBookReq(__ID, __TYPE_REQ)  \
         case __ID: \
         { \
-            const auto* req = static_cast<const Book # __TYPE_REQ*>((char*)opId+sizeof(*opId)); \
-            for(auto* book : books) book-> __TYPE_REQ(req); \
+            const auto* req = static_cast<const Book # __TYPE_REQ*>(req.mMsg); \
+            for(auto* book : books) book-> __TYPE_REQ(*req); \
         }
 
         if
         (
             books.size() > 1 && 
-            ((*opId != PART_BOOK_OP_BULK_DEL_REQ) ||
-            (*opId != PART_BOOK_OP_BULK_DEL_REQ))
+            ((id != PART_BOOK_OP_BULK_DEL_REQ) ||
+            (id != PART_BOOK_OP_BULK_DEL_REQ))
         )
         {
             return;
         }
 
-        switch(msgId)
+        switch(req.mMsgId)
         {
             default: return;
 
             case PART_BOOK_CREATE_REQ:
             {
-
                 size_t newBook = mBooks.size();
                 const auto* req = static_cast<const *EngCreateBookReq>((char*)opId+sizeof(*opId));
                 mBooks.emplace_back(
-                    Book{req->mBookBehaviours, ++mBookId, 0, mBookMem, *this});
+                    Book{req->mBookBehaviours, req->mBookId, 0, mBookMem, *this});
                 if(mSeriesBookLookup.find(req->mSeries) != mSeriesBookLookup.end())
                 {
                     //todo error
                     return;
                 }
                 mSeriesBookLookup[req->mSeries] = newBook;
-                mInstrumentTypeBookLookup[EngSeriesId2InstrType(req->mSeries)].push_back(newBook);
-                mInstrumentClassBookLookup[EngSeriesId2InstrClass(req->mSeries)].push_back(newBook);
-                mUnderlyingBookLookup[EngSeriesId2Underlying(req->mSeries)].push_back(newBook);
-                Send(EngAvailableBooksInd{PART_BOOK_AVAIL_IND, req->mSeries, req->mBookBehaviours, 0});
+                mSeriesBookLookup[MaskEngSeriesIdByInstrType(req->mSeries)].push_back(newBook);
+                mSeriesBookLookup[MaskEngSeriesIdByInstrClass(req->mSeries)].push_back(newBook);
+                mSeriesBookLookup[MaskEngSeriesIdByUnderlying(req->mSeries)].push_back(newBook);
+                Handle(EngAvailableBooksInd{PART_BOOK_AVAIL_IND, req->mSeries, req->mBookBehaviours, 0});
             }
             break;
 
+            HandleBookReq(PART_BOOK_OP_CLEAR_REQ,    ClearReq);
             HandleBookReq(PART_BOOK_OP_INSERT_REQ,   InsertReq);
             HandleBookReq(PART_BOOK_OP_QUOTE_REQ,    QuoteReq);
             HandleBookReq(PART_BOOK_OP_DEL_REQ,      DeleteReq);
             HandleBookReq(PART_BOOK_OP_BULK_DEL_REQ, BulkDeleteReq);
             HandleBookReq(PART_BOOK_OP_AMEND_REQ,    AmendReq);
         }
-        mLastOpId = opId->mSequence;
-        Send(EngOperationCnf{PART_OP_CNF, *opId});
+        mLastOpId = req.mOperationId.mSequence;
+        Handle(EngOperationCnf{PART_OP_CNF, req.mOperationId});
     }
 
-    void PostProcess()
+    void ImmediateCleanup()
     {
         for(auto leadingLoc : mDroppedLevels)
         {
-            size_t nextLoc = leadingLoc;
+            size_t nextLoc = leadingLoc->mLead;
             do
             {
                 mOrderFreeList.push_back(nextLoc);
@@ -218,7 +221,7 @@ struct Engine : IBookClient
             while(nextLoc);
         }
 
-        if(mOrderFreeList.empty()())
+        if(mOrderFreeList.empty())
         {
             size_t origSize = mMem.mOrderPool.size();
             mMem.mOrderPool.resize(2*mMem.mOrderPool.size());
@@ -229,10 +232,6 @@ struct Engine : IBookClient
     SharedBookMem mBookMem;
     std::vector<Book> mBooks
     std::dense_hash_map<EngSeriesId, size_t> mSeriesBookLookup;
-    std::dense_hash_map<uint32_t, std::vector<size_t>> mInstrumentTypeBookLookup;
-    std::dense_hash_map<uint64_t, std::vector<size_t>> mInstrumentClassBookLookup;
-    std::dense_hash_map<uint32_t, std::vector<size_t>> mUnderlyingBookLookup;
-
 };
 
 }

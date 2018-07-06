@@ -28,6 +28,10 @@ enum class ErrorCode : uint8_t
     CLIENT_HAS_NO_ORDERS = 1 << 2,
 };
 
+struct BookClearReq
+{
+};
+
 struct BookInsertReq
 {
     uint16_t   mClientId;
@@ -75,8 +79,14 @@ struct BookAmendReq
     char     mVarText[VAR_TEXT_SIZE];
 };
 
+struct BookClearInd
+{
+    uint16_t mBookId;
+};
+
 struct BookInsertInd
 {
+    uint16_t   mBookId;
     uint16_t   mClientId;
     uint64_t   mOrderId;
     OrderFlags mFlags;
@@ -86,12 +96,14 @@ struct BookInsertInd
 
 struct BookDeleteInd
 {
+    uint16_t mBookId;
     uint16_t mClientId;
     uint64_t mOrderId;
 };
 
 struct BookAmendInd
 {
+    uint16_t mBookId;
     uint16_t mClientId;
     uint64_t mOrigOrderId
     uint64_t mNewOrderId
@@ -102,6 +114,7 @@ struct BookAmendInd
 
 struct BookTradeInd
 {
+    uint16_t mBookId;
     uint64_t mTradeId;
     uint64_t mAggressorClientId;
     uint64_t mPassiveClientId;
@@ -114,6 +127,7 @@ struct BookTradeInd
 
 struct BookErrorInd
 {
+    uint16_t  mBookId;
     uint16_t  mClientId;
     uint64_t  mOrderId;
     ErrorCode mCode;
@@ -154,6 +168,7 @@ struct SharedBookMem
 struct IBookClient
 {
     virtual ~IBookClient(){}
+    virtual void Handle(const BookClearInd&& ind) = 0;
     virtual void Handle(const BookInsertInd&& ind) = 0;
     virtual void Handle(const BookDeleteInd&& ind) = 0;
     virtual void Handle(const BookAmendInd&& ind) = 0;
@@ -171,14 +186,10 @@ struct Book
     , mOrderId(initOrderId)
     , mTradeId(initTradeId)
     {
+        mBids.reserve(100);
+        mAsks.reserve(100);
     }
     
-    void Init(size_t initLevelAlloc, size_t initOrderAlloc)
-    {
-        mBids.reserve(initLevelAlloc);
-        mAsks.reserve(initLevelAlloc);
-    }
-
     inline SetOrder(size_t newLoc, uint16_t clientId, uint64_t orderId, 
         int64_t price, int64_t volume, const char& varText[VAR_TEXT_SIZE])
     {
@@ -207,18 +218,18 @@ struct Book
     inline uint64_t NextOrderId()
     {
         mOrderId = (++mOrderId & 0x0000FFFFFFFFFFFF);
-        return (mBookId << 58) | (mOrderId & 0x0000FFFFFFFFFFFF);
+        return (mBookId << 48) | (mOrderId & 0x0000FFFFFFFFFFFF);
     }
 
     inline uint64_t NextTradeId()
     {
         mTradeId = (++mTradeId & 0x0000FFFFFFFFFFFF);
-        return (mBookId << 58) | (mTradeId & 0x0000FFFFFFFFFFFF);
+        return (mBookId << 48) | (mTradeId & 0x0000FFFFFFFFFFFF);
     }
 
     void ProcessDelete(Order& order)
     {
-        mClient.Handle(BookDeleteInd{order.mClientId, order.mOrderId});
+        mClient.Handle(BookDeleteInd{mBookId, order.mClientId, order.mOrderId});
         mMem.mOrderLookup.erase(order.mOrderId);
         order.mVolume = 0;
         order.mOrderId = NULL_ID;
@@ -232,6 +243,7 @@ struct Book
     {
         size_t restingLoc = NULL_ORDER;
         BookTradeInd tradeInd;
+        tradeInd.mBookId             =  mBookId;
         tradeInd.mAggressorClientId  =  clientId;
         tradeInd.mAggressorOrderId   =  orderId;
         tradeInd.mAggressorIsBid     =  flags & IS_BID;
@@ -311,7 +323,7 @@ struct Book
         }
         else
         {
-            mClient.Handle(BookDeleteInd{clientId, orderId});
+            mClient.Handle(BookDeleteInd{mBookId, clientId, orderId});
         }
         return restingLoc;
     }
@@ -326,6 +338,7 @@ struct Book
         uint64_t newOrderId = NextOrderId();
 
         BookAmendInd amendInd;
+        amendInd.mBookId       =  mBookId;
         amendInd.mClientId     =  order.mClientId;
         amendInd.mOrigOrderId  =  order.mOrderId;
         amendInd.mNewOrderId   =  resetOrderId ? newOrderId : orderId;
@@ -403,6 +416,7 @@ struct Book
             uint64_t orderId = NextOrderId();
 
             BookInsertInd insertInd;
+            insertInd.mBookId    =  mBookId;
             insertInd.mClientId  =  clientId;
             insertInd.mOrderId   =  orderId;
             insertInd.mFlags     =  isBid ? IS_BID : IS_ASK;
@@ -424,11 +438,17 @@ struct Book
         }
     }
 
+    void ClearReq(const BookInsertReq& req)
+    {
+        // todo
+    }
+
     void InsertReq(const BookInsertReq& req)
     {
         uint64_t orderId = NextOrderId();
 
         BookInsertInd insertInd;
+        insertInd.mBookId    =  mBookId;
         insertInd.mClientId  =  req.mClientId;
         insertInd.mOrderId   =  orderId;
         insertInd.mFlags     =  req.mFlags;
@@ -461,7 +481,7 @@ struct Book
         auto litr = mMem.mOrderLookup.find(req.mOrderId);
         if(litr == mMem.mOrderLookup.end())
         {
-            mClient.Handle(BookErrorInd{req.mClientId, req.mOrderId, UNKNOWN_ORDER});
+            mClient.Handle(BookErrorInd{mBookId, req.mClientId, req.mOrderId, UNKNOWN_ORDER});
             return;
         }
         assert(mMem.mOrderPool.size() < litr->second);
@@ -469,7 +489,7 @@ struct Book
         auto& order = mMem.mOrderPool[litr->second];
         if(order.mClientId != req.mClientId)
         {
-            mClient.Handle(BookErrorInd{req.mClientId, req.mOrderId, NOT_CLIENT_ORDER});
+            mClient.Handle(BookErrorInd{mBookId, req.mClientId, req.mOrderId, NOT_CLIENT_ORDER});
             return;
         }
 
@@ -486,7 +506,7 @@ struct Book
         auto colitr = mMem.mClientOrderLookup.find(req.mClientId);
         if(colitr == mMem.mClientOrderLookup.end())
         {
-            mClient.Handle(BookErrorInd{req.mClientId, req.mOrderId, CLIENT_HAS_NO_ORDERS});
+            mClient.Handle(BookErrorInd{mBookId, req.mClientId, req.mOrderId, CLIENT_HAS_NO_ORDERS});
             return;
         }
         
@@ -517,7 +537,7 @@ struct Book
         auto litr = mMem.mOrderLookup.find(req.mOrderId);
         if(litr == mMem.mOrderLookup.end())
         {
-            mClient.Handle(BookErrorInd{req.mClientId, req.mOrderId, UNKNOWN_ORDER});
+            mClient.Handle(BookErrorInd{mBookId, req.mClientId, req.mOrderId, UNKNOWN_ORDER});
             return;
         }
         assert(mMem.mOrderPool.size() < litr->second);
@@ -525,7 +545,7 @@ struct Book
         auto& order = mMem.mOrderPool[litr->second];
         if(order.mClientId != req.mClientId)
         {
-            mClient.Handle(BookErrorInd{req.mClientId, req.mOrderId, NOT_CLIENT_ORDER});
+            mClient.Handle(BookErrorInd{mBookId, req.mClientId, req.mOrderId, NOT_CLIENT_ORDER});
         }
 
         ProcessAmend(order, litr->second, req.mPrice, req.mVolume, req.mVarText);
@@ -534,7 +554,6 @@ struct Book
     std::vector<Level> mBids; // offset to start and end of level
     std::vector<Level> mAsks;
     std::dense_hash_map<uint16_t, std::pair<std::vector<uint64_t>, std::vector<uint64_t>>> mClientQuotes;
-
 };
 
 }
