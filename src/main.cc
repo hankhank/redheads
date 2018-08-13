@@ -11,7 +11,7 @@
 #include <errno.h>
 #include <sys/epoll.h>
 
-#include "redheads/engine.h"
+#include "../lib/engine.h"
 
 #define MAX_EVENTS 100
 

@@ -1,19 +1,25 @@
 
+#include <vector>
+#include <sparsehash/dense_hash_map>
+
 namespace redheads
 {
+
+#define LIKELY(condition) __builtin_expect(static_cast<bool>(condition), 1)
+#define UNLIKELY(condition) __builtin_expect(static_cast<bool>(condition), 0)
 
 constexpr size_t   VAR_TEXT_SIZE = 10;
 constexpr size_t   NULL_ORDER    = 0;
 constexpr uint64_t NULL_ID       = 0;
 
-#pragma pack(1)
+#pragma pack(push, 1)
 
-enum class BookBehaviours : uint32_t
+enum BookBehaviours : uint32_t
 {
     AMEND_SAMEQP_SAMEID = 1 << 0
 };
 
-enum class OrderFlags : uint8_t
+enum OrderFlags : uint8_t
 {
     IS_BID = 1 << 0,
     IS_ASK = 1 << 1,
@@ -22,7 +28,7 @@ enum class OrderFlags : uint8_t
 
 enum class ErrorCode : uint8_t
 {
-    OK                   = 0;
+    OK                   = 0,
     UNKNOWN_ORDER        = 1 << 0,
     NOT_CLIENT_ORDER     = 1 << 1,
     CLIENT_HAS_NO_ORDERS = 1 << 2,
@@ -72,7 +78,7 @@ struct BookBulkDeleteReq
 struct BookAmendReq
 {
     uint16_t mClientId;
-    uint64_t mOrderId
+    uint64_t mOrderId;
     int64_t  mPrice;
     int64_t  mVolume;
     bool     mVolumeDelta;
@@ -105,8 +111,8 @@ struct BookAmendInd
 {
     uint16_t mBookId;
     uint16_t mClientId;
-    uint64_t mOrigOrderId
-    uint64_t mNewOrderId
+    uint64_t mOrigOrderId;
+    uint64_t mNewOrderId;
     int64_t  mPrice;
     int64_t  mVolume;
     bool     mVolumeDelta;
@@ -133,7 +139,7 @@ struct BookErrorInd
     ErrorCode mCode;
 };
 
-#pragma pop()
+#pragma pack(pop)
 
 struct Order
 {
@@ -152,13 +158,14 @@ struct OrderExtraInfo
 struct Level
 {
     size_t mLead; // First order
-    size_t mEnd   // Last order
+    size_t mEnd;   // Last order
+
 };
 
 struct SharedBookMem
 {
-    std::dense_hash_map<uint64_t, size_t> mOrderLookup;
-    std::dense_hash_map<uint16_t, std::vector<uint64_t>> mClientOrderLookup;
+    google::dense_hash_map<uint64_t, size_t> mOrderLookup;
+    google::dense_hash_map<uint16_t, std::vector<uint64_t>> mClientOrderLookup;
     std::vector<Order> mOrderPool;
     std::vector<OrderExtraInfo> mOrderExtraInfoPool;
     std::vector<size_t> mOrderFreeList;
@@ -173,12 +180,14 @@ struct IBookClient
     virtual void Handle(const BookDeleteInd&& ind) = 0;
     virtual void Handle(const BookAmendInd&& ind) = 0;
     virtual void Handle(const BookTradeInd&& ind) = 0;
+    virtual void Handle(const BookErrorInd&& ind) = 0;
     virtual void ImmediateCleanup() = 0;
 };
 
 struct Book
 {
-    Book(BookBehaviours behaviours, uint16_t bookId, uint64_t initOrderId, SharedBookMem& bookMem, IBookClient& client) 
+    Book(BookBehaviours behaviours, uint16_t bookId, uint64_t initOrderId, uint64_t initTradeId, 
+            SharedBookMem& bookMem, IBookClient& client) 
     : mBehaviours(behaviours)
     , mBookId(bookId)
     , mMem(bookMem)
@@ -190,41 +199,43 @@ struct Book
         mAsks.reserve(100);
     }
     
-    inline SetOrder(size_t newLoc, uint16_t clientId, uint64_t orderId, 
-        int64_t price, int64_t volume, const char& varText[VAR_TEXT_SIZE])
+    inline void SetOrder(size_t newLoc, uint16_t clientId, uint64_t orderId, 
+        int64_t price, int64_t volume, const char varText[VAR_TEXT_SIZE])
     {
         mMem.mOrderLookup[orderId] = newLoc;
-        mMem.mOrderExtraInfoPool.emplace(newLoc, {varText});
+        //mMem.mOrderExtraInfoPool.emplace(mMem.mOrderExtraInfoPool.begin() + newLoc, OrderExtraInfo{varText});
         mMem.mClientOrderLookup[clientId].push_back(orderId);
-        mMem.mOrderPool.emplace(newLoc, {clientId, orderId, price, volume, NULL_ORDER});
+        mMem.mOrderPool.emplace(mMem.mOrderPool.begin() + newLoc, Order{clientId, orderId, price, volume, NULL_ORDER});
     }
 
     inline size_t PopSetOrder(uint64_t orderId, uint16_t clientId, 
-        int64_t price, int64_t volume, const char& varText[VAR_TEXT_SIZE])
+        int64_t price, int64_t volume, const char varText[VAR_TEXT_SIZE])
     {
-        if(likely_false(mMem.mOrderFreeList.empty()))
+        if(UNLIKELY(mMem.mOrderFreeList.empty()))
         {
             mClient.ImmediateCleanup();
         }
         size_t newLoc = mMem.mOrderFreeList.back();
-        mMem.mOrderFreeList.pop();
+        mMem.mOrderFreeList.pop_back();
         mMem.mOrderLookup[orderId] = newLoc;
-        mMem.mOrderExtraInfoPool.emplace(newLoc, {varText});
+        //mMem.mOrderExtraInfoPool.emplace(mMem.mOrderExtraInfoPool.begin() + newLoc, OrderExtraInfo{varText});
         mMem.mClientOrderLookup[clientId].push_back(orderId);
-        mMem.mOrderPool.emplace(newLoc, {clientId, orderId, price, volume, NULL_ORDER});
+        mMem.mOrderPool.emplace(mMem.mOrderPool.begin() + newLoc, Order{clientId, orderId, price, volume, NULL_ORDER});
         return newLoc;
     }
 
     inline uint64_t NextOrderId()
     {
-        mOrderId = (++mOrderId & 0x0000FFFFFFFFFFFF);
-        return (mBookId << 48) | (mOrderId & 0x0000FFFFFFFFFFFF);
+        ++mOrderId;
+        mOrderId = (mOrderId & 0x0000FFFFFFFFFFFF);
+        return (((uint64_t)mBookId) << 48) | (mOrderId & 0x0000FFFFFFFFFFFF);
     }
 
     inline uint64_t NextTradeId()
     {
-        mTradeId = (++mTradeId & 0x0000FFFFFFFFFFFF);
-        return (mBookId << 48) | (mTradeId & 0x0000FFFFFFFFFFFF);
+        ++mTradeId;
+        mTradeId = (mTradeId & 0x0000FFFFFFFFFFFF);
+        return (((uint64_t)mBookId) << 48) | (mTradeId & 0x0000FFFFFFFFFFFF);
     }
 
     void ProcessDelete(Order& order)
@@ -238,7 +249,7 @@ struct Book
 
     template<typename T>
     size_t ProcessInsertSide(uint64_t orderId, uint16_t clientId, int64_t price, 
-        int64_t volume, OrderFlags flags, const char& varText[VAR_TEXT_SIZE],
+        int64_t volume, OrderFlags flags, const char varText[VAR_TEXT_SIZE],
         std::vector<Level>& supporting, std::vector<Level>& opposing, T lessAggressive)
     {
         size_t restingLoc = NULL_ORDER;
@@ -246,7 +257,7 @@ struct Book
         tradeInd.mBookId             =  mBookId;
         tradeInd.mAggressorClientId  =  clientId;
         tradeInd.mAggressorOrderId   =  orderId;
-        tradeInd.mAggressorIsBid     =  flags & IS_BID;
+        tradeInd.mAggressorIsBid     =  flags & OrderFlags::IS_BID;
 
         int64_t remainingVolume = volume;
         auto opitr = opposing.rbegin();
@@ -276,7 +287,7 @@ struct Book
                     tradeInd.mPassiveOrderId   =  order.mOrderId;
                     tradeInd.mPrice            =  order.mPrice;
                     tradeInd.mVolume           =  match;
-                    mClient.Handle(tradeInd);
+                    //mClient.Handle(tradeInd);
                 }
 
                 if(order.mVolume <= 0)
@@ -296,7 +307,7 @@ struct Book
             ++opitr;
         }
 
-        if(!(flags & IS_FAK) && (remainingVolume > 0))
+        if(!(flags & OrderFlags::IS_FAK) && (remainingVolume > 0))
         {
             auto britr = supporting.rbegin();
             // TODO instead of a linear search here I think we could linear search < 10 tops levels then fall
@@ -312,13 +323,13 @@ struct Book
                 {
                     restingLoc = PopSetOrder(orderId, clientId, price, volume, varText);
                     mMem.mOrderPool[britr->mEnd].mNext = restingLoc;
-                    britr->mEnd = newLoc;
+                    britr->mEnd = restingLoc;
                 }
             }
             else
             {
-                resetingLoc = PopSetOrder(orderId, clientId, price, volume, varText);
-                supporting.emplace(britr, {restingLoc, newLoc});
+                restingLoc = PopSetOrder(orderId, clientId, price, volume, varText);
+                //supporting.emplace(britr, Level{restingLoc, restingLoc});
             }
         }
         else
@@ -328,70 +339,72 @@ struct Book
         return restingLoc;
     }
 
-    size_t ProcessAmend(Order& order, size_t orderOffset, int64_t newPrice, int64_t newVolume, 
-        const char& varText[VAR_TEXT_SIZE])
+    size_t ProcessAmend(Order& order, size_t orderOffset, int64_t newPrice, int64_t newVolume, bool volumeDelta,
+        const char varText[VAR_TEXT_SIZE])
     {
         int64_t adjVolume = volumeDelta ? order.mVolume + newVolume : newVolume;
+        // TODO add check for negative volume
         bool qpLoss = (adjVolume > order.mVolume);
-        bool newPrice = (newPrice != 0);
-        bool resetOrderId = qpLoss || newPrice || (!(mBehaviour & AMEND_SAMEQP_SAMEID));
+        bool changePrice = (newPrice != 0);
+        int64_t price = changePrice ? newPrice : order.mPrice;
+        bool resetOrderId = qpLoss || changePrice || (!(mBehaviours & AMEND_SAMEQP_SAMEID));
         uint64_t newOrderId = NextOrderId();
 
         BookAmendInd amendInd;
         amendInd.mBookId       =  mBookId;
         amendInd.mClientId     =  order.mClientId;
         amendInd.mOrigOrderId  =  order.mOrderId;
-        amendInd.mNewOrderId   =  resetOrderId ? newOrderId : orderId;
-        amendInd.mPrice        =  newPrice;
+        amendInd.mNewOrderId   =  resetOrderId ? newOrderId : order.mOrderId;
+        amendInd.mPrice        =  price;
         amendInd.mVolume       =  newVolume;
-        amendInd.mVolumeDelta  =  newVolumeDelta;
-        mClient.Handle(amendInd);
+        amendInd.mVolumeDelta  =  volumeDelta;
+        //mClient.Handle(amendInd);
 
-        if(qpLoss || newPrice)
+        if(qpLoss || changePrice)
         {
-            bool isBid = !mBids.empty() && (order.mPrice <= mMem.mOrderPool[mBids.front().mLead]);
+            bool isBid = !mBids.empty() && (order.mPrice <= mMem.mOrderPool[mBids.front().mLead].mPrice);
 
             ProcessDelete(order);
             
             if(isBid)
             {
                 orderOffset = ProcessInsertSide(newOrderId, amendInd.mClientId, price, 
-                    volume, IS_BID, varText, mBids, mAsks, std::less);
+                    adjVolume, OrderFlags::IS_BID, varText, mBids, mAsks, std::less<int64_t>());
             }
             else
             {
                 orderOffset = ProcessInsertSide(newOrderId, amendInd.mClientId, price, 
-                    volume, IS_ASK, varText, mAsks, mBids, std::greater);
+                    adjVolume, OrderFlags::IS_ASK, varText, mAsks, mBids, std::greater<int64_t>());
             }
         }
         else if(!resetOrderId)
         {
             order.mVolume = adjVolume;
-            memcmp(mOrderExtraInfoPool[orderOffset].mVarText, varText, VAR_TEXT_SIZE);
+            memcmp(mMem.mOrderExtraInfoPool[orderOffset].mVarText, varText, VAR_TEXT_SIZE);
         }
         else
         {
             order.mVolume = adjVolume;
             order.mOrderId = newOrderId;
-            memcmp(mOrderExtraInfoPool[orderOffset].mVarText, varText, VAR_TEXT_SIZE);
+            memcmp(mMem.mOrderExtraInfoPool[orderOffset].mVarText, varText, VAR_TEXT_SIZE);
         }
         return orderOffset;
     }
 
     void ProcessQuotes(std::vector<uint64_t>& curQuotes, uint16_t clientId, bool isBid,
-            const char& varText[VAR_TEXT_SIZE], const QuoteLevel* levels, uint8_t levelCount)
+            const char varText[VAR_TEXT_SIZE], const QuoteLevel* levels, uint8_t levelCount)
     {
         uint8_t cnt = 0;
         auto curIdItr = curQuotes.begin();
-        while(curIdItr == curQuotes->end())
+        while(curIdItr == curQuotes.end())
         {
             // TODO later consider adding insert here if order has been
             // delete or traded otherwise quote adjustments might result 
             // in loss of qp
-            auto litr = mMem.mOrderLookup.find(req.mOrderId);
+            auto litr = mMem.mOrderLookup.find(*curIdItr);
             if(litr == mMem.mOrderLookup.end())
             {
-                curIdItr = curQuotes->erase(curIdItr);
+                curIdItr = curQuotes.erase(curIdItr);
                 continue;
             }
 
@@ -399,13 +412,13 @@ struct Book
             const auto& level = levels[cnt];
             if(cnt < levelCount)
             {
-                ProcessAmend(order, litr->second, level.mPrice, level.mVolume, varText);
+                ProcessAmend(order, litr->second, level.mPrice, level.mVolume, false, varText);
                 ++curIdItr;
             }
             else
             {
                 ProcessDelete(order);
-                curIdItr = curQuotes->erase(curIdItr);
+                curIdItr = curQuotes.erase(curIdItr);
             }
             ++cnt;
         }
@@ -419,20 +432,20 @@ struct Book
             insertInd.mBookId    =  mBookId;
             insertInd.mClientId  =  clientId;
             insertInd.mOrderId   =  orderId;
-            insertInd.mFlags     =  isBid ? IS_BID : IS_ASK;
+            insertInd.mFlags     =  isBid ? OrderFlags::IS_BID : OrderFlags::IS_ASK;
             insertInd.mPrice     =  level.mPrice;
             insertInd.mVolume    =  level.mVolume;
-            mClient.Handle(insertInd);
+            //mClient.Handle(insertInd);
             
             if(isBid)
             {
-                ProcessInsertSide(orderId, clientId, level.mPrice, level.mVolume, IS_BID, 
-                    varText, mBids, mAsks, std::less);
+                ProcessInsertSide(orderId, clientId, level.mPrice, level.mVolume, OrderFlags::IS_BID, 
+                    varText, mBids, mAsks, std::less<int64_t>());
             }
             else
             {
-                ProcessInsertSide(newOrderId, clientId, level.mPrice, level.mVolume, IS_ASK, 
-                    varText, mAsks, mBids, std::greater);
+                ProcessInsertSide(orderId, clientId, level.mPrice, level.mVolume, OrderFlags::IS_ASK, 
+                    varText, mAsks, mBids, std::greater<int64_t>());
             }
             curQuotes.push_back(orderId);
         }
@@ -454,15 +467,15 @@ struct Book
         insertInd.mFlags     =  req.mFlags;
         insertInd.mPrice     =  req.mPrice;
         insertInd.mVolume    =  req.mVolume;
-        mClient.Handle(insertInd);
+        //mClient.Handle(insertInd);
 
-        if(req.mFlags & IS_BID)
+        if(req.mFlags & OrderFlags::IS_BID)
         {
-            ProcessInsertSide(orderId, req.mClientId, req.mPrice, req.mVolume, req.mFlags, req.mVarText, mBids, mAsks, std::less);
+            ProcessInsertSide(orderId, req.mClientId, req.mPrice, req.mVolume, req.mFlags, req.mVarText, mBids, mAsks, std::less<int64_t>());
         }
         else
         {
-            ProcessInsertSide(orderId, req.mClientId, req.mPrice, req.mVolume, req.mFlags, req.mVarText, mAsks, mBids, std::greater);
+            ProcessInsertSide(orderId, req.mClientId, req.mPrice, req.mVolume, req.mFlags, req.mVarText, mAsks, mBids, std::greater<int64_t>());
         }
     }
 
@@ -472,8 +485,8 @@ struct Book
         // prices are descending and not in cross
         // do not modify other participants orders
         auto& curQuotes = mClientQuotes[req.mClientId];
-        ProcessQuotes(curQuotes, req.mClientId, true/*isbid*/, req.mVarText, req.mLevels, req.mBids);
-        ProcessQuotes(curQuotes, req.mClientId, false/*isbid*/, req.mVarText, req.mLevels+req.mBids, req.mAsks);
+        ProcessQuotes(curQuotes, req.mClientId, true/*isbid*/, req.mVarText, req.mQuotes, req.mBids);
+        ProcessQuotes(curQuotes, req.mClientId, false/*isbid*/, req.mVarText, req.mQuotes+req.mBids, req.mAsks);
     }
 
     void DeleteReq(BookDeleteReq& req)
@@ -481,7 +494,7 @@ struct Book
         auto litr = mMem.mOrderLookup.find(req.mOrderId);
         if(litr == mMem.mOrderLookup.end())
         {
-            mClient.Handle(BookErrorInd{mBookId, req.mClientId, req.mOrderId, UNKNOWN_ORDER});
+            mClient.Handle(BookErrorInd{mBookId, req.mClientId, req.mOrderId, ErrorCode::UNKNOWN_ORDER});
             return;
         }
         assert(mMem.mOrderPool.size() < litr->second);
@@ -489,16 +502,16 @@ struct Book
         auto& order = mMem.mOrderPool[litr->second];
         if(order.mClientId != req.mClientId)
         {
-            mClient.Handle(BookErrorInd{mBookId, req.mClientId, req.mOrderId, NOT_CLIENT_ORDER});
+            mClient.Handle(BookErrorInd{mBookId, req.mClientId, req.mOrderId, ErrorCode::NOT_CLIENT_ORDER});
             return;
         }
 
         ProcessDelete(order);
     }
     
-    inline bool MatchVarText(const char& pattern, const char& target)
+    inline bool MatchVarText(const char* pattern, const char* target)
     {
-        return strncmp(VAR_TEXT_SIZE, pattern, target) == 0;
+        return strncmp(pattern, target, VAR_TEXT_SIZE) == 0;
     }
 
     void BulkDeleteReq(BookBulkDeleteReq& req)
@@ -506,24 +519,25 @@ struct Book
         auto colitr = mMem.mClientOrderLookup.find(req.mClientId);
         if(colitr == mMem.mClientOrderLookup.end())
         {
-            mClient.Handle(BookErrorInd{mBookId, req.mClientId, req.mOrderId, CLIENT_HAS_NO_ORDERS});
+            mClient.Handle(BookErrorInd{mBookId, req.mClientId, NULL_ID, ErrorCode::CLIENT_HAS_NO_ORDERS});
             return;
         }
         
-        auto* orderIdItr = colitr->begin(); 
-        while(orderIdItr == colitr->end())
+        auto orderIdItr = colitr->second.begin(); 
+        while(orderIdItr == colitr->second.end())
         {
             auto litr = mMem.mOrderLookup.find(*orderIdItr);
             if(litr == mMem.mOrderLookup.end())
             {
-                orderIdItr = colitr->erase(orderIdItr);
+                orderIdItr = colitr->second.erase(orderIdItr);
                 continue;
             }
 
             if(MatchVarText(req.mVarText, mMem.mOrderExtraInfoPool[litr->second].mVarText))
             {
                 auto& order = mMem.mOrderPool[litr->second];
-                if(order.mFlags & req.mFlags)
+                //if(order.mFlags & req.mFlags)
+                // TODO delete only bids/asks
                 {
                     ProcessDelete(order);
                 }
@@ -537,7 +551,7 @@ struct Book
         auto litr = mMem.mOrderLookup.find(req.mOrderId);
         if(litr == mMem.mOrderLookup.end())
         {
-            mClient.Handle(BookErrorInd{mBookId, req.mClientId, req.mOrderId, UNKNOWN_ORDER});
+            mClient.Handle(BookErrorInd{mBookId, req.mClientId, req.mOrderId, ErrorCode::UNKNOWN_ORDER});
             return;
         }
         assert(mMem.mOrderPool.size() < litr->second);
@@ -545,15 +559,21 @@ struct Book
         auto& order = mMem.mOrderPool[litr->second];
         if(order.mClientId != req.mClientId)
         {
-            mClient.Handle(BookErrorInd{mBookId, req.mClientId, req.mOrderId, NOT_CLIENT_ORDER});
+            mClient.Handle(BookErrorInd{mBookId, req.mClientId, req.mOrderId, ErrorCode::NOT_CLIENT_ORDER});
         }
 
-        ProcessAmend(order, litr->second, req.mPrice, req.mVolume, req.mVarText);
+        ProcessAmend(order, litr->second, req.mPrice, req.mVolume, req.mVolumeDelta, req.mVarText);
     }
 
+    const BookBehaviours mBehaviours;
+    uint16_t mBookId;
+    SharedBookMem& mMem;
+    IBookClient& mClient;
+    uint64_t mOrderId;
+    uint64_t mTradeId;
     std::vector<Level> mBids; // offset to start and end of level
     std::vector<Level> mAsks;
-    std::dense_hash_map<uint16_t, std::pair<std::vector<uint64_t>, std::vector<uint64_t>>> mClientQuotes;
+    google::dense_hash_map<uint16_t, std::vector<uint64_t>> mClientQuotes;
 };
 
 }

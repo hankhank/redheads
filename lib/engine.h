@@ -1,10 +1,11 @@
 
+#include <sparsehash/dense_hash_map>
 #include "book.h"
 
 namespace redheads
 {
 
-#pragma pack(1)
+#pragma pack(push, 1)
 
 enum class EngMsgId : uint8_t
 {
@@ -89,7 +90,7 @@ struct EngOperationCnf
     OperationId mOperationId;
 };
 
-#pragma pop()
+#pragma pack(pop)
 
 inline EngSeriesId MaskEngSeriesIdByInstrType(EngSeriesId id)
 {
@@ -105,6 +106,7 @@ inline EngSeriesId MaskEngSeriesIdByInstrClass(EngSeriesId id)
     id.mModifier = 0;
     id.mExpirationDate = 0;
     id.mStrikePrice = 0;
+    return id;
 }
 
 inline EngSeriesId MaskEngSeriesIdByUnderlying(EngSeriesId id)
@@ -113,6 +115,7 @@ inline EngSeriesId MaskEngSeriesIdByUnderlying(EngSeriesId id)
     id.mModifier = 0;
     id.mExpirationDate = 0;
     id.mStrikePrice = 0;
+    return id;
 }
 
 struct IEngineClient
@@ -128,11 +131,11 @@ struct Engine : IBookClient
     void Init(size_t initLevelAlloc, size_t initOrderAlloc, size_t initClientAlloc)
     {
         assert(mBookMem.mOrderPool.empty() && "Can only init allocate once");
-        mOrderLookup.resize(initOrderAlloc);
-        mClientOrderLookup.resize(initClientAlloc);
-        mOrderExtraInfoPool.reserve(initOrderAlloc);
-        mOrderFreeList.reserve(initOrderAlloc);
-        mDroppedLevels.reserve(initLevelAlloc);
+        mBookMem.mOrderLookup.resize(initOrderAlloc);
+        mBookMem.mClientOrderLookup.resize(initClientAlloc);
+        mBookMem.mOrderExtraInfoPool.reserve(initOrderAlloc);
+        mBookMem.mOrderFreeList.reserve(initOrderAlloc);
+        mBookMem.mDroppedLevels.reserve(initLevelAlloc);
 
         for(size_t i = 0; i < initOrderAlloc; ++i) mOrderFreeList.push_back(i);
     }
@@ -208,7 +211,7 @@ struct Engine : IBookClient
 
     void ImmediateCleanup()
     {
-        for(auto leadingLoc : mDroppedLevels)
+        for(auto leadingLoc : mBookMem.mDroppedLevels)
         {
             size_t nextLoc = leadingLoc->mLead;
             do
@@ -230,8 +233,9 @@ struct Engine : IBookClient
     }
 
     SharedBookMem mBookMem;
-    std::vector<Book> mBooks
-    std::dense_hash_map<EngSeriesId, size_t> mSeriesBookLookup;
+    std::vector<Book> mBooks;
+    google::dense_hash_map<EngSeriesId, size_t> mSeriesBookLookup;
+
 };
 
 }
